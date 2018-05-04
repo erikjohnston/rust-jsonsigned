@@ -64,6 +64,12 @@ impl Signatures {
             .and_then(|m| m.get(key_id))
             .map(|s| s.0)
     }
+
+    pub fn add_signature(&mut self, server_name: String, key_id: String, signature: sign::Signature) {
+        self.0.entry(server_name)
+            .or_insert_with(HashMap::new)
+            .insert(key_id, Signature(signature));
+    }
 }
 
 impl AsRef<HashMap<String, HashMap<String, Signature>>> for Signatures {
@@ -93,10 +99,6 @@ impl<E> SignedJson<E> {
         &self.signatures
     }
 
-    pub fn get_signatures_mut(&mut self) -> &mut Signatures {
-        &mut self.signatures
-    }
-
     pub fn verify(
         &self,
         server_name: &str,
@@ -114,6 +116,16 @@ impl<E> SignedJson<E> {
         } else {
             bail!("not signed by specified server/key_id")
         }
+    }
+
+    pub fn sign(
+        &mut self,
+        server_name: String,
+        key_id: String,
+        key: &sign::SecretKey,
+    ) {
+        let sig = sign::sign_detached(self.get_bytes(), &key);
+        self.signatures.add_signature(server_name, key_id, sig);
     }
 }
 
@@ -187,7 +199,7 @@ where
 }
 
 pub fn canonicalize(bytes: &[u8]) -> serde_json::Result<Vec<u8>> {
-    let val: serde_json::Value = try!(serde_json::from_slice(bytes));
+    let val: serde_json::Value = serde_json::from_slice(bytes)?;
     encode_canonically(&val)
 }
 
@@ -211,6 +223,8 @@ pub fn encode_canonically<S: serde::Serialize>(st: &S) -> serde_json::Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::str;
 
     #[test]
     fn test_deserialize_signature() {
@@ -240,7 +254,6 @@ mod tests {
         assert_eq!(s.as_ref(), &Test{ my_key: "my_data".into()});
 
         let k = b"qA\xeb\xc2^+(\\~P\x91(\xa4\xf4L\x1f\xeb\x07E\xae\x8b#q(\rMq\xf2\xc9\x8f\xe1\xca";
-        println!("{}", k.len());
         let seed = sign::Seed::from_slice(k).unwrap();
         let (pubkey, _) = sign::keypair_from_seed(&seed);
 
@@ -261,5 +274,33 @@ mod tests {
         let v2: serde_json::Value = serde_json::from_str(&d).unwrap();
 
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_sign() {
+        let b = r#"{"my_key": "my_data"}"#;
+
+        #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+        struct Test {
+            my_key: String,
+        };
+
+        let mut s: SignedJson<Test> = SignedJson::from_slice(b.as_bytes()).unwrap();
+
+        assert_eq!(s.as_ref(), &Test{ my_key: "my_data".into()});
+
+        let k = b"qA\xeb\xc2^+(\\~P\x91(\xa4\xf4L\x1f\xeb\x07E\xae\x8b#q(\rMq\xf2\xc9\x8f\xe1\xca";
+        let seed = sign::Seed::from_slice(k).unwrap();
+        let (pubkey, secret_key) = sign::keypair_from_seed(&seed);
+
+        s.sign("Alice".into(), "ed25519:zxcvb".into(), &secret_key);
+        s.verify("Alice", "ed25519:zxcvb", &pubkey).unwrap();
+
+        let expected = r#"{"my_key":"my_data","signatures":{"Alice":{"ed25519:zxcvb":"hvA+XXFEkHk80pLMeIYjNkWy5Ds2ZckSrvj00NvbyFJQe3H9LuJNnu8JLZ/ffIzChs3HmhwPldO0MSmyJAYpCA"}}}"#;
+
+        let vec = serde_json::to_vec(&s).unwrap();
+        let mut new_vec = Vec::with_capacity(vec.len());
+        indolentjson::compact::compact(&vec, &mut new_vec).unwrap();
+        assert_eq!(expected, str::from_utf8(&new_vec[..]).unwrap());
     }
 }
